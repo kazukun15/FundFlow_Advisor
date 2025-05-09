@@ -1,4 +1,19 @@
-import streamlit as st
+# Write the updated requirements.txt
+requirements_txt = """\
+streamlit
+pdfplumber
+pytesseract
+pdf2image
+pillow
+pandas
+openai
+"""
+
+with open('/mnt/data/requirements.txt', 'w') as f:
+    f.write(requirements_txt)
+
+# Write the updated app code with Gemini 2.5 model
+app_code = """import streamlit as st
 import pdfplumber
 import pandas as pd
 import pytesseract
@@ -12,7 +27,7 @@ openai.api_key = st.secrets["openai"]["api_key"]
 
 # --- PDF抽出関数 ---
 def extract_tables_from_pdf(file_bytes):
-    """PDFからテーブルを抽出してDataFrameとして返す"""
+    \"\"\"PDFからテーブルを抽出してDataFrameとして返す\"\"\"
     with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
         tables = []
         for page in pdf.pages:
@@ -27,7 +42,7 @@ def extract_tables_from_pdf(file_bytes):
     return pd.DataFrame()
 
 def fallback_ocr_pdf(file_bytes):
-    """OCRでPDFを画像化し、テキストを抽出"""
+    \"\"\"OCRでPDFを画像化し、テキストを抽出\"\"\"
     images = convert_from_bytes(file_bytes)
     text = ""
     for img in images:
@@ -36,7 +51,7 @@ def fallback_ocr_pdf(file_bytes):
 
 # --- 正規化関数 ---
 def normalize_df(df):
-    """数値カラムを正しく認識させるクリーニング処理"""
+    \"\"\"数値カラムを正しく認識させるクリーニング処理\"\"\"
     df = df.copy()
     df.columns = df.columns.str.strip()
     for col in df.columns:
@@ -50,7 +65,7 @@ def normalize_df(df):
 
 # --- 突合関数 ---
 def reconcile_reports(pub_df, other_dfs):
-    """公金日計と他日報を比較し、差異をまとめる"""
+    \"\"\"公金日計と他日報を比較し、差異をまとめる\"\"\"
     pub_sum = pub_df['金額'].sum() if '金額' in pub_df.columns else pub_df.select_dtypes(include='number').sum().sum()
     suggestions = []
     for name, df in other_dfs.items():
@@ -66,14 +81,14 @@ def reconcile_reports(pub_df, other_dfs):
 
 # --- AI示唆生成関数 ---
 def generate_ai_suggestions(suggestions):
-    """差異情報をもとに原因示唆をAIに生成させる"""
+    \"\"\"差異情報をもとに原因示唆をAIに生成させる\"\"\"
     prompt = (
         "以下の日報突合結果について、"
-        "なぜ差異が発生したかの可能性を箇条書きで示唆してください。\n"
+        "なぜ差異が発生したかの可能性を箇条書きで示唆してください。\\n"
         f"{suggestions}"
     )
     response = openai.ChatCompletion.create(
-        model='gpt-4o-mini',
+        model='gemini-2.5',
         messages=[{"role": "user", "content": prompt}],
         temperature=0.7
     )
@@ -130,3 +145,11 @@ def main():
 
 if __name__ == "__main__":
     main()
+"""
+
+with open('/mnt/data/app_updated.py', 'w') as f:
+    f.write(app_code)
+
+# Display links for download
+print("[Download requirements.txt](sandbox:/mnt/data/requirements.txt)")
+print("[Download updated app code](sandbox:/mnt/data/app_updated.py)")
