@@ -4,4 +4,4 @@ pytesseract
 pdf2image
 pillow
 pandas
-openai
+google-generativeai
