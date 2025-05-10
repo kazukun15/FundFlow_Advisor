@@ -1,5 +1,4 @@
 import io
-
 import streamlit as st
 import pdfplumber
 import pandas as pd
@@ -8,20 +7,20 @@ from pdf2image import convert_from_bytes
 import google.generativeai as genai
 
 # ─── Google API Key 設定（Secrets） ────────────────────────────
-# .streamlit/secrets.toml の [google] セクションからのみ取得します
-api_key = st.secrets["google"]["api_key"]
+api_key = st.secrets.get("google", {}).get("api_key")
+if not api_key:
+    st.error("❌ .streamlit/secrets.toml の [google] api_key を設定してください。")
+    st.stop()
 genai.configure(api_key=api_key)
 
 # ─── PDF解析関数 ───────────────────────────────────────────
 def extract_tables_from_pdf(file_bytes: bytes) -> pd.DataFrame:
-    """PDFからテーブルを抽出してDataFrameとして返す"""
     with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
         tables = [tbl for page in pdf.pages for tbl in (page.extract_tables() or [])]
     dfs = [pd.DataFrame(tbl[1:], columns=tbl[0]) for tbl in tables if len(tbl) > 1]
     return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
 
 def fallback_ocr_pdf(file_bytes: bytes) -> str:
-    """OCRでスキャンPDFをテキスト化"""
     images = convert_from_bytes(file_bytes)
     text = ""
     for img in images:
@@ -30,7 +29,6 @@ def fallback_ocr_pdf(file_bytes: bytes) -> str:
 
 # ─── データ正規化関数 ───────────────────────────────────
 def normalize_df(df: pd.DataFrame) -> pd.DataFrame:
-    """文字列のカンマ除去・数値化を試みるクリーン処理"""
     df = df.copy()
     df.columns = df.columns.str.strip()
     for col in df.columns:
@@ -42,9 +40,8 @@ def normalize_df(df: pd.DataFrame) -> pd.DataFrame:
             pass
     return df
 
-# ─── 突合ロジック ───────────────────────────────────────
+# ─── 突合ロジック ───────────────────────────────────
 def reconcile_reports(pub_df: pd.DataFrame, other_dfs: dict) -> list[dict]:
-    """公金日計と他日報を比較し、差異リストを返す"""
     pub_sum = (
         pub_df["金額"].sum()
         if "金額" in pub_df.columns
@@ -68,7 +65,6 @@ def reconcile_reports(pub_df: pd.DataFrame, other_dfs: dict) -> list[dict]:
 
 # ─── AI示唆生成関数 ───────────────────────────────────
 def generate_ai_suggestions(suggestions: list[dict]) -> str:
-    """差異結果を Gemini 2.5 に渡し、原因示唆を返す"""
     df = pd.DataFrame(suggestions)
     prompt = (
         "以下の日報突合結果について、差異の原因を箇条書きで示してください。\n\n"
@@ -81,7 +77,7 @@ def generate_ai_suggestions(suggestions: list[dict]) -> str:
     )
     return response.candidates[0].message.content
 
-# ─── Streamlit UI ───────────────────────────────────────
+# ─── Streamlit UI ───────────────────────────────────
 def main():
     st.set_page_config(page_title="FundFlow Advisor", layout="wide")
     st.title("FundFlow Advisor")
@@ -90,28 +86,39 @@ def main():
         "差異突合結果と Gemini 2.5 による原因示唆を行います。"
     )
 
-    pub_file = st.file_uploader("📑 公金日計PDFをアップロード", type="pdf")
+    # type制限なしでまずアップロード
+    pub_file = st.file_uploader("📑 公金日計PDFをアップロード", type=None)
     other_files = st.file_uploader(
-        "📑 他部署日報PDFをアップロード（複数可）",
-        type="pdf",
+        "📑 他部署日報PDFをアップロード（複数可）", 
+        type=None, 
         accept_multiple_files=True
     )
 
+    # 入力チェック
     if not pub_file or not other_files:
-        st.info("まずは両方の PDF をアップロードしてください。")
+        st.info("まず両方のPDFをアップロードしてください。")
         return
+
+    # ファイル名拡張子チェック
+    if not pub_file.name.lower().endswith(".pdf"):
+        st.error("公金日計ファイルはPDF形式(.pdf)をアップロードしてください。")
+        return
+    for f in other_files:
+        if not f.name.lower().endswith(".pdf"):
+            st.error(f"「{f.name}」はPDF形式(.pdf)ではありません。")
+            return
 
     # 公金日計解析
     pub_bytes = pub_file.read()
     df_pub = extract_tables_from_pdf(pub_bytes)
     if df_pub.empty:
-        st.warning("公金日計のテーブル抽出に失敗しました。OCR結果を確認してください。")
+        st.warning("公金日計のテーブル抽出に失敗しました。OCR結果をご確認ください。")
         st.text_area("OCR（公金日計）", fallback_ocr_pdf(pub_bytes), height=200)
     df_pub = normalize_df(df_pub)
     st.subheader("公金日計プレビュー")
     st.dataframe(df_pub)
 
-    # 各部署日報解析
+    # 他部署日報解析
     other_dfs = {}
     for f in other_files:
         buf = f.read()
