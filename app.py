@@ -47,22 +47,27 @@ def reconcile_reports(pub: pd.DataFrame, others: dict) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 def generate_ai_suggestions(df_diff: pd.DataFrame) -> str:
-    prompt = "以下の日報突合結果について、差異の原因を箇条書きで示してください。\n\n" + df_diff.to_markdown(index=False)
-    resp = genai.chat.completions.create(model="gemini-2.5",
-                                         prompt=[{"author":"user","content":prompt}],
-                                         temperature=0.7)
+    prompt = (
+        "以下の日報突合結果について、差異の原因を箇条書きで示してください。\n\n"
+        + df_diff.to_markdown(index=False)
+    )
+    resp = genai.chat.completions.create(
+        model="gemini-2.5",
+        prompt=[{"author":"user","content":prompt}],
+        temperature=0.7
+    )
     return resp.candidates[0].message.content
 
 # ─── メイン ───────────────────────────────────────────
 def main():
     st.title("FundFlow Advisor 🏦")
     st.markdown(
-        "- 左のサイドバーで**PDF/Excel**ファイルを選択\n"
-        "- 上部タブで「プレビュー」「差異サマリー」「AI示唆」を切り替え"
+        "- サイドバーで**PDF/Excel**をアップロード\n"
+        "- 上部タブ「プレビュー」「差異サマリー」「AI示唆」を切り替え"
     )
 
     uploaded = st.sidebar.file_uploader(
-        "📁 ファイルをアップロード（PDF / XLS / XLSX）",
+        "📁 ファイルをアップロード（PDF/XLS/XLSX）",
         type=None, accept_multiple_files=True
     )
     if not uploaded:
@@ -71,19 +76,19 @@ def main():
 
     pub_df = pd.DataFrame()
     others = {}
-    allowed = {".pdf",".xls",".xlsx"}
+    allowed = {".pdf", ".xls", ".xlsx"}
 
     for f in uploaded:
         name, ext = f.name, os.path.splitext(f.name)[1].lower()
         buf = f.read()
         if ext not in allowed:
-            st.sidebar.error(f"{name} は非対応形式です。PDF/XLS/XLSXを使用してください。")
+            st.sidebar.error(f"{name} は非対応形式です。")
             continue
 
         if ext == ".pdf":
             df = extract_tables_from_pdf(buf)
             if df.empty:
-                st.sidebar.warning(f"[PDF] {name} 抽出失敗。OCRを実行します。")
+                st.sidebar.warning(f"{name} の表抽出失敗。OCRを表示。")
                 st.sidebar.text_area(f"OCR({name})", fallback_ocr_pdf(buf), height=150)
                 df = pd.DataFrame()
             df = normalize_df(df)
@@ -93,7 +98,7 @@ def main():
                 others[name] = df
 
         else:
-            engine = "xlrd" if ext==".xls" else "openpyxl"
+            engine = "xlrd" if ext=="xls" else "openpyxl"
             try:
                 sheets = pd.read_excel(io.BytesIO(buf), sheet_name=None, engine=engine)
             except Exception as e:
@@ -104,7 +109,7 @@ def main():
                 others[key] = normalize_df(sdf)
 
     if pub_df.empty or not others:
-        st.warning("公金日計(PDF)と他日報を最低1件ずつ含めてください。")
+        st.warning("公金日計(PDF)と他日報を1件以上含めてください。")
         return
 
     df_diff = reconcile_reports(pub_df, others)
@@ -113,24 +118,24 @@ def main():
     tab1, tab2, tab3 = st.tabs(["🔍 プレビュー", "📊 差異サマリー", "🤖 AI示唆"])
     with tab1:
         st.subheader("■ 公金日計プレビュー")
-        st.table(pub_df.head(10))
+        st.code(pub_df.head(10).to_string(index=False), language="")
         for name, df in others.items():
-            st.subheader(f"■ 他日報プレビュー：{name}")
-            st.table(df.head(10))
+            st.subheader(f"■ 他日報プレビュー: {name}")
+            st.code(df.head(10).to_string(index=False), language="")
 
     with tab2:
         if df_diff.empty:
             st.success("差異は検出されませんでした。")
         else:
             st.subheader("■ 差異サマリー")
-            st.table(df_diff)
+            st.code(df_diff.to_string(index=False), language="")
 
     with tab3:
         if df_diff.empty:
             st.info("差異がないためAI示唆はありません。")
         else:
             st.subheader("■ 差異原因示唆 (Gemini 2.5)")
-            st.write(ai_text)
+            st.markdown(ai_text)
 
 if __name__ == "__main__":
     main()
