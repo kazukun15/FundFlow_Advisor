@@ -24,17 +24,20 @@ def fallback_ocr_pdf(file_bytes: bytes) -> str:
     images = convert_from_bytes(file_bytes)
     return "".join(pytesseract.image_to_string(img, lang="jpn") for img in images)
 
-# ─── データ正規化（修正） ──────────────────────────────────
+# ─── データ正規化（安全版） ─────────────────────────────────
 def normalize_df(df: pd.DataFrame) -> pd.DataFrame:
-    # 1) 列名をすべて文字列化して strip
+    """
+    ・列名をすべて文字列化して strip
+    ・各セルを map() で文字列化→カンマ除去→trim→数値変換
+    """
     df = df.copy()
+    # 列名を str 化して strip
     df.columns = [str(col).strip() for col in df.columns]
-    # 2) 各セルを文字列化→カンマ除去→trim→数値変換
     for col in df.columns:
-        # 文字列化してカンマ除去
-        df[col] = df[col].astype(str).str.replace(",", "", regex=True).str.strip()
-        # 数値に変換可能なら変換
-        df[col] = pd.to_numeric(df[col], errors="ignore")
+        # map で要素単位に処理
+        cleaned = df[col].map(lambda x: str(x).replace(",", "").strip())
+        # 数値変換（できないものは元の文字列）
+        df[col] = pd.to_numeric(cleaned, errors="ignore")
     return df
 
 # ─── 表示サニタイズ ────────────────────────────────────
@@ -42,22 +45,20 @@ def sanitize_df_for_display(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     for col in df.columns:
         if df[col].dtype == object:
-            df[col] = df[col].apply(
-                lambda x: x if isinstance(x, (str, int, float, bool, type(None))) else str(x)
-            )
+            df[col] = df[col].map(lambda x: x if isinstance(x, (str, int, float, bool, type(None))) else str(x))
     return df
 
 # ─── 突合ロジック ─────────────────────────────────────
 def reconcile_reports(pub_df: pd.DataFrame, other_dfs: dict) -> list[dict]:
     pub_sum = (
-        pub_df["金額"].sum()
+        pub_df.get("金額", pd.Series(dtype=float)).sum()
         if "金額" in pub_df.columns
         else pub_df.select_dtypes(include="number").sum().sum()
     )
     results = []
     for name, df in other_dfs.items():
         df_sum = (
-            df["金額"].sum()
+            df.get("金額", pd.Series(dtype=float)).sum()
             if "金額" in df.columns
             else df.select_dtypes(include="number").sum().sum()
         )
@@ -70,7 +71,7 @@ def reconcile_reports(pub_df: pd.DataFrame, other_dfs: dict) -> list[dict]:
             })
     return results
 
-# ─── AI示唆生成 ─────────────────────────────────────
+# ─── AI示唆生成 ───────────────────────────────────
 def generate_ai_suggestions(suggestions: list[dict]) -> str:
     df = pd.DataFrame(suggestions)
     prompt = (
@@ -84,13 +85,13 @@ def generate_ai_suggestions(suggestions: list[dict]) -> str:
     )
     return response.candidates[0].message.content
 
-# ─── Streamlit UI ─────────────────────────────────────
+# ─── Streamlit UI ────────────────────────────────────
 def main():
     st.set_page_config(page_title="FundFlow Advisor", layout="wide")
     st.title("FundFlow Advisor")
     st.markdown(
-        "PDF または Excel をアップロードし、"
-        "日計の突合および Gemini 2.5 での原因示唆を行います。"
+        "PDF または Excel をアップロードし、日計の突合および "
+        "Gemini 2.5 での原因示唆を行います。"
     )
 
     uploaded = st.file_uploader(
@@ -115,9 +116,20 @@ def main():
                 st.warning(f"[PDF] {name} の抽出に失敗。OCR結果を表示します。")
                 st.text_area(f"OCR（{name}）", fallback_ocr_pdf(buf), height=200)
                 df = pd.DataFrame()
+            df = normalize_df(df)
+            if pub_df.empty:
+                pub_df = df
+                st.subheader("公金日計プレビュー")
+                st.dataframe(sanitize_df_for_display(pub_df))
+            else:
+                other_dfs[name] = df
+                with st.expander(f"他日報プレビュー：{name}", expanded=False):
+                    st.dataframe(sanitize_df_for_display(df))
+
         elif ext in (".xls", ".xlsx"):
             try:
-                sheets = pd.read_excel(io.BytesIO(buf), sheet_name=None, engine="xlrd" if ext==".xls" else None)
+                sheets = pd.read_excel(io.BytesIO(buf), sheet_name=None,
+                                       engine="xlrd" if ext == ".xls" else None)
             except Exception as e:
                 st.error(f"{name} の Excel 読み込みエラー: {e}")
                 continue
@@ -127,20 +139,9 @@ def main():
                 other_dfs[key] = df_clean
                 with st.expander(f"プレビュー：{key}", expanded=False):
                     st.dataframe(sanitize_df_for_display(df_clean))
-            continue
+
         else:
             st.error(f"{name} はサポート外の拡張子です。")
-            continue
-
-        df = normalize_df(df)
-        if pub_df.empty:
-            pub_df = df
-            st.subheader("公金日計プレビュー")
-            st.dataframe(sanitize_df_for_display(pub_df))
-        else:
-            other_dfs[name] = df
-            with st.expander(f"他日報プレビュー：{name}", expanded=False):
-                st.dataframe(sanitize_df_for_display(df))
 
     if pub_df.empty or not other_dfs:
         st.warning("公金日計と他日報の両方が必要です。")
