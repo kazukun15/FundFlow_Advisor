@@ -27,16 +27,28 @@ def fallback_ocr_pdf(file_bytes: bytes) -> str:
         text += pytesseract.image_to_string(img, lang="jpn")
     return text
 
-# ─── データ正規化関数 ───────────────────────────────────
+# ─── データ正規化関数（修正版） ─────────────────────────────
 def normalize_df(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    各列を以下の順でクリーン:
+      1) 余白・カンマ削除（object dtype のみ）
+      2) 数値変換（可能な場合）
+    Series 以外はスキップ。
+    """
     df = df.copy()
     df.columns = df.columns.str.strip()
     for col in df.columns:
-        if df[col].dtype == object:
-            df[col] = df[col].str.replace(",", "").str.strip()
+        ser = df[col]
+        # Series 以外（たとえば MultiIndex 選択）はスキップ
+        if not isinstance(ser, pd.Series):
+            continue
+        # object dtype のみ文字列操作
+        if ser.dtype == object:
+            df[col] = ser.str.replace(",", "", regex=True).str.strip()
+        # 数値に変換可能なら変換
         try:
             df[col] = pd.to_numeric(df[col])
-        except:
+        except Exception:
             pass
     return df
 
@@ -63,7 +75,7 @@ def reconcile_reports(pub_df: pd.DataFrame, other_dfs: dict) -> list[dict]:
             })
     return results
 
-# ─── AI示唆生成関数 ───────────────────────────────────
+# ─── AI示唆生成関数 ─────────────────────────────────
 def generate_ai_suggestions(suggestions: list[dict]) -> str:
     df = pd.DataFrame(suggestions)
     prompt = (
@@ -82,38 +94,36 @@ def main():
     st.set_page_config(page_title="FundFlow Advisor", layout="wide")
     st.title("FundFlow Advisor")
     st.markdown(
-        "公金日計PDFと各部署日報PDFをアップロードし、"
+        "公金日計PDFと他部署日報PDFをアップロードし、"
         "差異突合結果と Gemini 2.5 による原因示唆を行います。"
     )
 
-    # type制限なしでまずアップロード
     pub_file = st.file_uploader("📑 公金日計PDFをアップロード", type=None)
     other_files = st.file_uploader(
-        "📑 他部署日報PDFをアップロード（複数可）", 
-        type=None, 
+        "📑 他部署日報PDFをアップロード（複数可）",
+        type=None,
         accept_multiple_files=True
     )
 
-    # 入力チェック
     if not pub_file or not other_files:
-        st.info("まず両方のPDFをアップロードしてください。")
+        st.info("まず両方の PDF をアップロードしてください。")
         return
 
-    # ファイル名拡張子チェック
+    # 拡張子チェック
     if not pub_file.name.lower().endswith(".pdf"):
-        st.error("公金日計ファイルはPDF形式(.pdf)をアップロードしてください。")
+        st.error("公金日計ファイルは .pdf の拡張子でアップロードしてください。")
         return
     for f in other_files:
         if not f.name.lower().endswith(".pdf"):
-            st.error(f"「{f.name}」はPDF形式(.pdf)ではありません。")
+            st.error(f"{f.name} は .pdf 形式ではありません。")
             return
 
     # 公金日計解析
-    pub_bytes = pub_file.read()
-    df_pub = extract_tables_from_pdf(pub_bytes)
+    buf = pub_file.read()
+    df_pub = extract_tables_from_pdf(buf)
     if df_pub.empty:
         st.warning("公金日計のテーブル抽出に失敗しました。OCR結果をご確認ください。")
-        st.text_area("OCR（公金日計）", fallback_ocr_pdf(pub_bytes), height=200)
+        st.text_area("OCR（公金日計）", fallback_ocr_pdf(buf), height=200)
     df_pub = normalize_df(df_pub)
     st.subheader("公金日計プレビュー")
     st.dataframe(df_pub)
@@ -124,7 +134,7 @@ def main():
         buf = f.read()
         df = extract_tables_from_pdf(buf)
         if df.empty:
-            st.warning(f"{f.name} の抽出に失敗。OCR結果を表示します。")
+            st.warning(f"{f.name} の抽出に失敗しました。OCR結果を表示します。")
             st.text_area(f"OCR（{f.name}）", fallback_ocr_pdf(buf), height=200)
         df = normalize_df(df)
         other_dfs[f.name] = df
