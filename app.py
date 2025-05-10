@@ -15,7 +15,7 @@ if not api_key:
     st.stop()
 genai.configure(api_key=api_key)
 
-# ─── ユーティリティ関数 ─────────────────────────────────
+# ─── ユーティリティ ─────────────────────────────────────
 def extract_tables_from_pdf(buf: bytes) -> pd.DataFrame:
     with pdfplumber.open(io.BytesIO(buf)) as pdf:
         tables = [t for p in pdf.pages for t in (p.extract_tables() or [])]
@@ -31,76 +31,66 @@ def normalize_df(df: pd.DataFrame) -> pd.DataFrame:
     df.columns = [str(c).strip() for c in df.columns]
     for c in df.columns:
         try:
-            s = df[c].map(lambda x: str(x).replace(",", "").strip())
-            df[c] = pd.to_numeric(s, errors="ignore")
+            cleaned = df[c].map(lambda x: str(x).replace(",", "").strip())
+            df[c] = pd.to_numeric(cleaned, errors="ignore")
         except Exception:
             st.warning(f"⚠️ 列 '{c}' の正規化に失敗。元のまま保持します。")
     return df
 
-def reconcile_reports(pub_df: pd.DataFrame, others: dict) -> pd.DataFrame:
-    base = pub_df.select_dtypes(include="number").sum().sum()
+def reconcile_reports(pub: pd.DataFrame, others: dict) -> pd.DataFrame:
+    base = pub.select_dtypes(include="number").sum().sum()
     rows = []
     for name, df in others.items():
         s = df.select_dtypes(include="number").sum().sum()
         if base != s:
-            rows.append({
-                "レポート": name,
-                "公金日計合計": base,
-                "他日報合計": s,
-                "差異": s - base
-            })
+            rows.append({"レポート": name, "公金日計合計": base, "他日報合計": s, "差異": s-base})
     return pd.DataFrame(rows)
 
 def generate_ai_suggestions(df_diff: pd.DataFrame) -> str:
-    prompt = (
-        "以下の日報突合結果について、差異の原因を箇条書きで示してください。\n\n"
-        + df_diff.to_markdown(index=False)
-    )
-    resp = genai.chat.completions.create(
-        model="gemini-2.5",
-        prompt=[{"author":"user","content":prompt}],
-        temperature=0.7
-    )
+    prompt = "以下の日報突合結果について、差異の原因を箇条書きで示してください。\n\n" + df_diff.to_markdown(index=False)
+    resp = genai.chat.completions.create(model="gemini-2.5",
+                                         prompt=[{"author":"user","content":prompt}],
+                                         temperature=0.7)
     return resp.candidates[0].message.content
 
 # ─── メイン ───────────────────────────────────────────
 def main():
     st.title("FundFlow Advisor 🏦")
-    st.markdown("**PDF**／**Excel**をアップロードし、日報の突合と原因示唆を行います。\n\n"
-                "- **まず** 左サイドバーでファイルを選択\n"
-                "- **次に** 上部のタブで「プレビュー」「差異」「AI示唆」を切り替え")
+    st.markdown(
+        "- 左のサイドバーで**PDF/Excel**ファイルを選択\n"
+        "- 上部タブで「プレビュー」「差異サマリー」「AI示唆」を切り替え"
+    )
 
     uploaded = st.sidebar.file_uploader(
-        "📁 ファイル選択 (PDF / XLS / XLSX)",
-        type=None,
-        accept_multiple_files=True
+        "📁 ファイルをアップロード（PDF / XLS / XLSX）",
+        type=None, accept_multiple_files=True
     )
     if not uploaded:
         st.sidebar.info("ここでファイルをアップロードしてください。")
         return
 
-    # 公金日計と他日報に振り分け
     pub_df = pd.DataFrame()
-    other = {}
-    allowed = {".pdf", ".xls", ".xlsx"}
+    others = {}
+    allowed = {".pdf",".xls",".xlsx"}
 
     for f in uploaded:
         name, ext = f.name, os.path.splitext(f.name)[1].lower()
         buf = f.read()
         if ext not in allowed:
-            st.sidebar.error(f"{name} は非対応です。PDF/XLS/XLSXをご利用ください。")
+            st.sidebar.error(f"{name} は非対応形式です。PDF/XLS/XLSXを使用してください。")
             continue
 
         if ext == ".pdf":
             df = extract_tables_from_pdf(buf)
             if df.empty:
-                st.sidebar.warning(f"{name} のテーブル抽出失敗。OCRを実行します。")
+                st.sidebar.warning(f"[PDF] {name} 抽出失敗。OCRを実行します。")
                 st.sidebar.text_area(f"OCR({name})", fallback_ocr_pdf(buf), height=150)
+                df = pd.DataFrame()
             df = normalize_df(df)
             if pub_df.empty:
                 pub_df = df
             else:
-                other[name] = df
+                others[name] = df
 
         else:
             engine = "xlrd" if ext==".xls" else "openpyxl"
@@ -111,29 +101,26 @@ def main():
                 continue
             for sheet, sdf in sheets.items():
                 key = f"{name}:{sheet}"
-                sdf = normalize_df(sdf)
-                other[key] = sdf
+                others[key] = normalize_df(sdf)
 
-    if pub_df.empty or not other:
-        st.warning("公金日計(PDF)と他日報(Excel/PDF)を最低1件ずつ含めてください。")
+    if pub_df.empty or not others:
+        st.warning("公金日計(PDF)と他日報を最低1件ずつ含めてください。")
         return
 
-    # 突合とAI示唆を実行
-    df_diff = reconcile_reports(pub_df, other)
+    df_diff = reconcile_reports(pub_df, others)
     ai_text = generate_ai_suggestions(df_diff) if not df_diff.empty else ""
 
-    # 上部タブで切り替え
     tab1, tab2, tab3 = st.tabs(["🔍 プレビュー", "📊 差異サマリー", "🤖 AI示唆"])
     with tab1:
         st.subheader("■ 公金日計プレビュー")
-        st.markdown(pub_df.head(10).to_markdown())
-        for name, df in other.items():
+        st.table(pub_df.head(10))
+        for name, df in others.items():
             st.subheader(f"■ 他日報プレビュー：{name}")
-            st.markdown(df.head(10).to_markdown())
+            st.table(df.head(10))
 
     with tab2:
         if df_diff.empty:
-            st.success("🎉 差異は検出されませんでした。")
+            st.success("差異は検出されませんでした。")
         else:
             st.subheader("■ 差異サマリー")
             st.table(df_diff)
@@ -142,8 +129,8 @@ def main():
         if df_diff.empty:
             st.info("差異がないためAI示唆はありません。")
         else:
-            st.subheader("■ Gemini 2.5 による差異原因示唆")
-            st.markdown(ai_text)
+            st.subheader("■ 差異原因示唆 (Gemini 2.5)")
+            st.write(ai_text)
 
 if __name__ == "__main__":
     main()
