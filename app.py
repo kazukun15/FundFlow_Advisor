@@ -1,4 +1,4 @@
-import io
+import io, os
 import streamlit as st
 import pdfplumber
 import pandas as pd
@@ -6,14 +6,14 @@ import pytesseract
 from pdf2image import convert_from_bytes
 import google.generativeai as genai
 
-# ─── Google API Key 設定（Secrets） ────────────────────────────
+# ─── 設定（Secrets）───────────────────────────────────
 api_key = st.secrets.get("google", {}).get("api_key")
 if not api_key:
-    st.error("❌ .streamlit/secrets.toml の [google] api_key を設定してください。")
+    st.error("❌ `.streamlit/secrets.toml` の [google] api_key を設定してください。")
     st.stop()
 genai.configure(api_key=api_key)
 
-# ─── PDF解析関数 ───────────────────────────────────────────
+# ─── PDF解析 ───────────────────────────────────────────
 def extract_tables_from_pdf(file_bytes: bytes) -> pd.DataFrame:
     with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
         tables = [tbl for page in pdf.pages for tbl in (page.extract_tables() or [])]
@@ -22,12 +22,10 @@ def extract_tables_from_pdf(file_bytes: bytes) -> pd.DataFrame:
 
 def fallback_ocr_pdf(file_bytes: bytes) -> str:
     images = convert_from_bytes(file_bytes)
-    text = ""
-    for img in images:
-        text += pytesseract.image_to_string(img, lang="jpn")
+    text = "".join(pytesseract.image_to_string(img, lang="jpn") for img in images)
     return text
 
-# ─── データ正規化関数 ───────────────────────────────────
+# ─── データ正規化 ───────────────────────────────────
 def normalize_df(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df.columns = df.columns.str.strip()
@@ -37,38 +35,24 @@ def normalize_df(df: pd.DataFrame) -> pd.DataFrame:
             df[col] = ser.str.replace(",", "", regex=True).str.strip()
         try:
             df[col] = pd.to_numeric(df[col])
-        except Exception:
+        except:
             pass
     return df
 
-# ─── 表示用サニタイズ関数 ─────────────────────────────────
+# ─── 表示サニタイズ ───────────────────────────────────
 def sanitize_df_for_display(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    pyarrow が Arrow テーブル変換時に対応できない
-    非スカラー値をすべて文字列化して返す。
-    """
     df = df.copy()
     for col in df.columns:
         if df[col].dtype == object:
-            df[col] = df[col].apply(
-                lambda x: x if isinstance(x, (str, int, float, bool, type(None))) else str(x)
-            )
+            df[col] = df[col].apply(lambda x: x if isinstance(x, (str,int,float,bool,type(None))) else str(x))
     return df
 
-# ─── 突合ロジック ───────────────────────────────────
+# ─── 突合ロジック ────────────────────────────────────
 def reconcile_reports(pub_df: pd.DataFrame, other_dfs: dict) -> list[dict]:
-    pub_sum = (
-        pub_df["金額"].sum()
-        if "金額" in pub_df.columns
-        else pub_df.select_dtypes(include="number").sum().sum()
-    )
+    pub_sum = pub_df["金額"].sum() if "金額" in pub_df.columns else pub_df.select_dtypes(include="number").sum().sum()
     results = []
     for name, df in other_dfs.items():
-        df_sum = (
-            df["金額"].sum()
-            if "金額" in df.columns
-            else df.select_dtypes(include="number").sum().sum()
-        )
+        df_sum = df["金額"].sum() if "金額" in df.columns else df.select_dtypes(include="number").sum().sum()
         if pub_sum != df_sum:
             results.append({
                 "レポート": name,
@@ -78,7 +62,7 @@ def reconcile_reports(pub_df: pd.DataFrame, other_dfs: dict) -> list[dict]:
             })
     return results
 
-# ─── AI示唆生成関数 ─────────────────────────────────
+# ─── AI示唆生成 ────────────────────────────────────
 def generate_ai_suggestions(suggestions: list[dict]) -> str:
     df = pd.DataFrame(suggestions)
     prompt = (
@@ -97,63 +81,75 @@ def main():
     st.set_page_config(page_title="FundFlow Advisor", layout="wide")
     st.title("FundFlow Advisor")
     st.markdown(
-        "公金日計PDFと各部署日報PDFをアップロードし、"
-        "差異突合結果と Gemini 2.5 による原因示唆を行います。"
+        "PDFまたはExcelをアップロードし、日計の突合および"
+        "Gemini 2.5による原因示唆を行います。"
     )
 
-    pub_file = st.file_uploader("📑 公金日計PDFをアップロード", type=None)
-    other_files = st.file_uploader(
-        "📑 他部署日報PDFをアップロード（複数可）",
-        type=None,
+    uploaded = st.file_uploader(
+        "📁 ファイルをアップロード（PDF または XLS）", 
+        type=None, 
         accept_multiple_files=True
     )
-
-    if not pub_file or not other_files:
-        st.info("まず両方の PDF をアップロードしてください。")
+    if not uploaded:
+        st.info("まずはPDFまたはExcelファイルをアップロードしてください。")
         return
 
-    # 拡張子チェック
-    if not pub_file.name.lower().endswith(".pdf"):
-        st.error("公金日計ファイルは .pdf の拡張子でアップロードしてください。")
-        return
-    for f in other_files:
-        if not f.name.lower().endswith(".pdf"):
-            st.error(f"{f.name} は .pdf 形式ではありません。")
-            return
-
-    # 公金日計解析
-    buf = pub_file.read()
-    df_pub = extract_tables_from_pdf(buf)
-    if df_pub.empty:
-        st.warning("公金日計のテーブル抽出に失敗しました。OCR結果をご確認ください。")
-        st.text_area("OCR（公金日計）", fallback_ocr_pdf(buf), height=200)
-
-    df_pub = normalize_df(df_pub)
-    st.subheader("公金日計プレビュー")
-    st.dataframe(sanitize_df_for_display(df_pub))
-
-    # 他部署日報解析
+    # 公金日計と他日報を自動判定
+    pub_df = pd.DataFrame()
     other_dfs = {}
-    for f in other_files:
+    for f in uploaded:
+        name = f.name
+        ext = os.path.splitext(name)[1].lower()
         buf = f.read()
-        df = extract_tables_from_pdf(buf)
-        if df.empty:
-            st.warning(f"{f.name} の抽出に失敗しました。OCR結果を表示します。")
-            st.text_area(f"OCR（{f.name}）", fallback_ocr_pdf(buf), height=200)
 
+        # PDF
+        if ext == ".pdf":
+            df = extract_tables_from_pdf(buf)
+            if df.empty:
+                st.warning(f"[PDF] {name} 抽出失敗。OCR結果を表示。")
+                st.text_area(f"OCR（{name}）", fallback_ocr_pdf(buf), height=200)
+                df = pd.DataFrame()
+        # Excel
+        elif ext in (".xls", ".xlsx"):
+            try:
+                sheets = pd.read_excel(io.BytesIO(buf), sheet_name=None, engine="xlrd" if ext==".xls" else None)
+            except Exception as e:
+                st.error(f"{name} のExcel読み込みエラー: {e}")
+                continue
+            for sheet_name, sheet_df in sheets.items():
+                key = f"{name}:{sheet_name}"
+                df = normalize_df(sheet_df)
+                other_dfs[key] = df
+                st.subheader(f"プレビュー：{key}")
+                st.dataframe(sanitize_df_for_display(df))
+            continue
+        else:
+            st.error(f"{name} はサポート外の拡張子です。")
+            continue
+
+        # ここまで来るのはPDFのみ
         df = normalize_df(df)
-        other_dfs[f.name] = df
-        st.subheader(f"{f.name} プレビュー")
-        st.dataframe(sanitize_df_for_display(df))
+        # 最初のPDFを「公金日計」として扱い、以降は他日報
+        if pub_df.empty:
+            pub_df = df
+            st.subheader("公金日計プレビュー")
+            st.dataframe(sanitize_df_for_display(pub_df))
+        else:
+            other_dfs[name] = df
+            st.subheader(f"他日報プレビュー：{name}")
+            st.dataframe(sanitize_df_for_display(df))
+
+    if pub_df.empty or not other_dfs:
+        st.warning("公金日計と他日報の両方が必要です。")
+        return
 
     # 突合＆AI示唆
-    diffs = reconcile_reports(df_pub, other_dfs)
+    diffs = reconcile_reports(pub_df, other_dfs)
     if diffs:
         st.subheader("▶ 差異サマリ")
         st.table(sanitize_df_for_display(pd.DataFrame(diffs)))
         st.subheader("▶ Gemini 2.5 による原因示唆")
-        suggestion = generate_ai_suggestions(diffs)
-        st.markdown(suggestion)
+        st.markdown(generate_ai_suggestions(diffs))
     else:
         st.success("🎉 差異は検出されませんでした。")
 
