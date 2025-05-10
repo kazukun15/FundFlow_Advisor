@@ -27,31 +27,21 @@ def fallback_ocr_pdf(file_bytes: bytes) -> str:
 
 # ─── データ正規化 ────────────────────────────────────────
 def normalize_df(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    ・列名を文字列化して strip
-    ・各列を element-wise map で文字列化→カンマ除去→trim→数値変換
-    ・エラーの起きた列は元のまま残す
-    """
     df = df.copy()
     df.columns = [str(col).strip() for col in df.columns]
     for col in df.columns:
         try:
-            # 文字列化＋カンマ除去＋trim
             cleaned = df[col].map(lambda x: str(x).replace(",", "").strip())
-            # 数値変換（できなければ cleaned のまま）
             df[col] = pd.to_numeric(cleaned, errors="ignore")
         except Exception:
-            st.warning(f"⚠️ 列 '{col}' の正規化に失敗しました。元の値を保持します。")
-            # 元の df[col] をそのまま（skip）
+            st.warning(f"⚠️ 列 '{col}' の正規化に失敗しました。元のまま保持します。")
     return df
 
-# ─── プレビュー用サニタイズ ─────────────────────────────────
+# ─── 表示サニタイズ ─────────────────────────────────────
 def sanitize_df_for_display(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-    for col in df.columns:
-        if df[col].dtype == object:
-            df[col] = df[col].map(lambda x: x if isinstance(x, (str,int,float,bool,type(None))) else str(x))
-    return df
+    return df.applymap(
+        lambda x: x if isinstance(x, (str, int, float, bool, type(None))) else str(x)
+    )
 
 # ─── 突合ロジック ─────────────────────────────────────────
 def reconcile_reports(pub_df: pd.DataFrame, other_dfs: dict) -> list[dict]:
@@ -69,8 +59,8 @@ def reconcile_reports(pub_df: pd.DataFrame, other_dfs: dict) -> list[dict]:
     return results
 
 # ─── AI示唆生成 ─────────────────────────────────────────
-def generate_ai_suggestions(suggestions: list[dict]) -> str:
-    df = pd.DataFrame(suggestions)
+def generate_ai_suggestions(diffs: list[dict]) -> str:
+    df = pd.DataFrame(diffs)
     prompt = (
         "以下の日報突合結果について、差異の原因を箇条書きで示してください。\n\n"
         + df.to_markdown(index=False)
@@ -86,10 +76,10 @@ def generate_ai_suggestions(suggestions: list[dict]) -> str:
 def main():
     st.set_page_config(page_title="FundFlow Advisor", layout="wide")
     st.title("FundFlow Advisor 📊")
-    st.markdown("PDF/Excelをアップロードし、日報突合とGemini 2.5による原因示唆を行います。")
+    st.markdown("PDF/Excelをアップロードし、日報突合と Gemini 2.5 による原因示唆を行います。")
 
     uploaded_files = st.file_uploader(
-        "📁 ファイルをアップロード（PDF/XLS/XLSX）",
+        "📁 ファイルをアップロード（PDF / XLS / XLSX）",
         type=None,
         accept_multiple_files=True
     )
@@ -107,14 +97,13 @@ def main():
         buf = f.read()
 
         if ext not in allowed_exts:
-            st.error(f"🚫 {name} はサポート外の形式です。PDF/XLS/XLSXを使用してください。")
+            st.error(f"🚫 {name} はサポート外の形式です。PDF/XLS/XLSX を使用してください。")
             continue
 
-        # PDF処理
         if ext == ".pdf":
             df = extract_tables_from_pdf(buf)
             if df.empty:
-                st.warning(f"[PDF] {name} はOCRが必要です。")
+                st.warning(f"[PDF] {name} の抽出失敗。OCR結果を表示します。")
                 st.text_area(f"OCR({name})", fallback_ocr_pdf(buf), height=200)
                 df = pd.DataFrame()
             df = normalize_df(df)
@@ -127,13 +116,12 @@ def main():
                 with st.expander(f"他日報プレビュー ({name})", expanded=False):
                     st.dataframe(sanitize_df_for_display(df))
 
-        # Excel処理
-        else:
+        else:  # Excel
             engine = "xlrd" if ext == ".xls" else "openpyxl"
             try:
                 sheets = pd.read_excel(io.BytesIO(buf), sheet_name=None, engine=engine)
             except Exception as e:
-                st.error(f"{name} の Excel 読み込みエラー: {e}")
+                st.error(f"{name} の読み込みエラー: {e}")
                 continue
             for sheet_name, sheet_df in sheets.items():
                 key = f"{name}:{sheet_name}"
@@ -148,10 +136,12 @@ def main():
 
     diffs = reconcile_reports(pub_df, other_dfs)
     if diffs:
+        # 先にAI示唆を表示
+        st.subheader("🤖 Gemini 2.5 による原因示唆")
+        st.markdown(generate_ai_suggestions(diffs))
+        # 次に差異サマリー
         st.subheader("🚩 差異サマリー")
         st.table(sanitize_df_for_display(pd.DataFrame(diffs)))
-        st.subheader("🤖 Gemini 2.5による原因示唆")
-        st.markdown(generate_ai_suggestions(diffs))
     else:
         st.success("🎉 差異は検出されませんでした。")
 
