@@ -5,7 +5,6 @@ import pdfplumber
 import pandas as pd
 import pytesseract
 from pdf2image import convert_from_bytes
-import matplotlib.pyplot as plt
 import google.generativeai as genai
 
 # ─── Streamlit Secrets から google.api_key を取得 ───────────────────────────
@@ -77,7 +76,7 @@ def reconcile(pub: pd.DataFrame, others: dict) -> pd.DataFrame:
     rows = []
     for name, df in others.items():
         tot = df.select_dtypes("number").sum().sum()
-        rows.append({"レポート": name, "公金日計合計": base, "他日報合計": tot, "差異": tot-base})
+        rows.append({"レポート": name, "公金日計合計": base, "他日報合計": tot, "差異": tot - base})
     return pd.DataFrame(rows)
 
 def analyze_cf(pub: pd.DataFrame):
@@ -92,7 +91,7 @@ def analyze_cf(pub: pd.DataFrame):
     else:
         infl = nums[nums>0].sum().sum(); outf = -nums[nums<0].sum().sum()
     net = infl - outf
-    return {"前日残高":ob,"総流入":infl,"総流出":outf,"純増減":net}, sums
+    return {"前日残高": ob, "総流入": infl, "総流出": outf, "純増減": net}, sums
 
 def ai_suggest(df_diff: pd.DataFrame) -> str:
     diff = df_diff[df_diff["差異"] != 0]
@@ -138,13 +137,13 @@ def main():
     st.markdown("PDFをアップロード後、**分析開始**ボタンで処理を実行します。")
 
     files = st.sidebar.file_uploader(
-        "📁 公金日計PDF と 他日報PDF（複数可）", type=None, accept_multiple_files=True
+        "📁 公金日計PDF と 他日報PDF（複数可）",
+        type=None, accept_multiple_files=True
     )
     if not files:
         st.sidebar.info("ここにPDFをアップロードしてください。")
         return
 
-    # アップロード完了後、ユーザーが押すまで分析を始めない
     if not st.sidebar.button("分析開始"):
         st.sidebar.info("準備完了。分析開始ボタンを押してください。")
         return
@@ -152,7 +151,8 @@ def main():
     pub_df = pd.DataFrame(); others = {}
     for f in files:
         if not f.name.lower().endswith(".pdf"):
-            st.sidebar.error(f"{f.name} はPDFではありません"); continue
+            st.sidebar.error(f"{f.name} はPDFではありません")
+            continue
         raw = extract_tables_from_pdf(f.read())
         if raw.empty:
             st.sidebar.warning(f"{f.name} 表抽出失敗→OCR表示")
@@ -160,17 +160,21 @@ def main():
             continue
         df = normalize_df(raw)
         if pub_df.empty:
-            pub_df = df; st.sidebar.success(f"{f.name} を公金日計として設定")
+            pub_df = df
+            st.sidebar.success(f"{f.name} を公金日計として設定")
         else:
-            others[f.name] = df; st.sidebar.success(f"{f.name} を他日報に追加")
+            others[f.name] = df
+            st.sidebar.success(f"{f.name} を他日報に追加")
 
     # 基本解析
-    df_diff        = reconcile(pub_df, others) if others else pd.DataFrame()
+    df_diff, diff_ai = pd.DataFrame(), "他日報がないため突合AIはありません"
+    if others:
+        df_diff = reconcile(pub_df, others)
+        diff_ai = ai_suggest(df_diff)
+
     cf_metrics, cf_sums = analyze_cf(pub_df)
-    diff_ai        = ai_suggest(df_diff)    if not df_diff.empty else "他日報なし"
     fund_sums, fund_ai = fund_advice(pub_df)
 
-    # タブ表示
     tab1,tab2,tab3,tab4,tab5 = st.tabs([
         "🔍 プレビュー","📊 差異","💡 キャッシュ分析","🤖 突合AI提案","🏦 基金アドバイス"
     ])
@@ -202,11 +206,8 @@ def main():
         st.subheader("列合計デバッグ")
         st.dataframe(cf_sums, use_container_width=True)
         # グラフ表示
-        fig, ax = plt.subplots()
-        ax.bar(cf_sums.index, cf_sums["合計"])
-        ax.set_title("各項目合計")
-        ax.set_ylabel("金額")
-        st.pyplot(fig)
+        st.subheader("▶ 各項目合計グラフ")
+        st.bar_chart(cf_sums["合計"])
 
     with tab4:
         st.subheader("AIによる突合原因提案")
@@ -217,12 +218,10 @@ def main():
         if fund_sums:
             df_fs = pd.DataFrame.from_dict(fund_sums, orient="index", columns=["残高"])
             st.table(df_fs.assign(残高=lambda d: d["残高"].map("{:,}".format)))
-            # 基金グラフ
-            fig2, ax2 = plt.subplots()
-            ax2.bar(df_fs.index, df_fs["残高"])
-            ax2.set_title("基金残高")
-            ax2.set_ylabel("金額")
-            st.pyplot(fig2)
+            st.subheader("▶ 基金残高グラフ")
+            st.bar_chart(df_fs["残高"])
+        else:
+            st.info("基金データが見つかりませんでした。")
         st.markdown(fund_ai)
 
 if __name__ == "__main__":
