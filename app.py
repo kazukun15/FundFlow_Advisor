@@ -1,4 +1,3 @@
-import os
 import io
 
 import streamlit as st
@@ -8,41 +7,28 @@ import pytesseract
 from pdf2image import convert_from_bytes
 import google.generativeai as genai
 
-# ─── Google API Key 設定 ──────────────────────────────
-# 1) ~/.streamlit/secrets.toml の [google] セクション
-# 2) 環境変数 GOOGLE_API_KEY
-# 3) サイドバーの入力フォーム
-api_key = (
-    st.secrets.get("google", {}).get("api_key")
-    or os.getenv("GOOGLE_API_KEY")
-    or st.sidebar.text_input(
-        "Google API Key",
-        type="password",
-        help="secrets.toml または環境変数に設定がなければこちらに入力"
-    )
-)
-if not api_key:
-    st.sidebar.error("❌ Google API Key が設定されていません。")
-    st.stop()
+# ─── Google API Key 設定（Secrets） ────────────────────────────
+# .streamlit/secrets.toml の [google] セクションからのみ取得します
+api_key = st.secrets["google"]["api_key"]
 genai.configure(api_key=api_key)
 
-# ─── PDF解析 ───────────────────────────────────────────
+# ─── PDF解析関数 ───────────────────────────────────────────
 def extract_tables_from_pdf(file_bytes: bytes) -> pd.DataFrame:
-    """PDF からテーブルを抽出して DataFrame を返す"""
+    """PDFからテーブルを抽出してDataFrameとして返す"""
     with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
         tables = [tbl for page in pdf.pages for tbl in (page.extract_tables() or [])]
     dfs = [pd.DataFrame(tbl[1:], columns=tbl[0]) for tbl in tables if len(tbl) > 1]
     return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
 
 def fallback_ocr_pdf(file_bytes: bytes) -> str:
-    """OCR でスキャン PDF をテキスト化"""
+    """OCRでスキャンPDFをテキスト化"""
     images = convert_from_bytes(file_bytes)
     text = ""
     for img in images:
         text += pytesseract.image_to_string(img, lang="jpn")
     return text
 
-# ─── データ正規化 ───────────────────────────────────
+# ─── データ正規化関数 ───────────────────────────────────
 def normalize_df(df: pd.DataFrame) -> pd.DataFrame:
     """文字列のカンマ除去・数値化を試みるクリーン処理"""
     df = df.copy()
@@ -56,7 +42,7 @@ def normalize_df(df: pd.DataFrame) -> pd.DataFrame:
             pass
     return df
 
-# ─── 突合ロジック ───────────────────────────────────
+# ─── 突合ロジック ───────────────────────────────────────
 def reconcile_reports(pub_df: pd.DataFrame, other_dfs: dict) -> list[dict]:
     """公金日計と他日報を比較し、差異リストを返す"""
     pub_sum = (
@@ -80,10 +66,9 @@ def reconcile_reports(pub_df: pd.DataFrame, other_dfs: dict) -> list[dict]:
             })
     return results
 
-# ─── AI 示唆生成 ───────────────────────────────────
+# ─── AI示唆生成関数 ───────────────────────────────────
 def generate_ai_suggestions(suggestions: list[dict]) -> str:
     """差異結果を Gemini 2.5 に渡し、原因示唆を返す"""
-    # Markdown テーブルに変換してプロンプト作成
     df = pd.DataFrame(suggestions)
     prompt = (
         "以下の日報突合結果について、差異の原因を箇条書きで示してください。\n\n"
@@ -94,15 +79,14 @@ def generate_ai_suggestions(suggestions: list[dict]) -> str:
         prompt=[{"author": "user", "content": prompt}],
         temperature=0.7
     )
-    # 最初の候補を返す
     return response.candidates[0].message.content
 
-# ─── Streamlit UI ───────────────────────────────────
+# ─── Streamlit UI ───────────────────────────────────────
 def main():
     st.set_page_config(page_title="FundFlow Advisor", layout="wide")
     st.title("FundFlow Advisor")
     st.markdown(
-        "公金日計 PDF と 各部署日報 PDF をアップロードし、"
+        "公金日計PDFと各部署日報PDFをアップロードし、"
         "差異突合結果と Gemini 2.5 による原因示唆を行います。"
     )
 
