@@ -7,7 +7,6 @@ import pytesseract
 from pdf2image import convert_from_bytes
 import google.generativeai as genai
 
-# ──────────────────────────────────────────────────
 # Google API Key設定 (Secrets経由)
 api_key = st.secrets.get("google", {}).get("api_key")
 if not api_key:
@@ -15,8 +14,7 @@ if not api_key:
     st.stop()
 genai.configure(api_key=api_key)
 
-# ──────────────────────────────────────────────────
-# PDFからテーブルを抽出
+# PDF解析
 def extract_tables_from_pdf(file_bytes: bytes) -> pd.DataFrame:
     with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
         tables = [tbl for page in pdf.pages for tbl in (page.extract_tables() or [])]
@@ -28,17 +26,13 @@ def fallback_ocr_pdf(file_bytes: bytes) -> str:
     images = convert_from_bytes(file_bytes)
     return "".join(pytesseract.image_to_string(img, lang="jpn") for img in images)
 
-# ──────────────────────────────────────────────────
-# 頑強なデータ正規化関数（最終改善版）
+# 頑強なデータ正規化関数
 def normalize_df(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df.columns = [str(col).strip() for col in df.columns]
-
     for col in df.columns:
         try:
-            # 一貫した文字列化処理で安全に
             s = df[col].astype(str).map(lambda x: x.replace(",", "").strip())
-            # 数値に安全変換
             df[col] = pd.to_numeric(s, errors="ignore")
         except Exception as e:
             raise ValueError(f"列 '{col}' でエラー発生。詳細: {e}")
@@ -81,17 +75,16 @@ def generate_ai_suggestions(suggestions: list[dict]) -> str:
     )
     return response.candidates[0].message.content
 
-# ──────────────────────────────────────────────────
-# Streamlit UI
+# Streamlit UI（修正済）
 def main():
     st.set_page_config(page_title="FundFlow Advisor", layout="wide")
     st.title("FundFlow Advisor 📊✨")
     st.markdown(
-        "PDF/Excelをアップロードし、日報突合とGemini2.5による差異原因示唆を行います。"
+        "PDFまたはExcelをアップロードし、日報突合とGemini2.5による差異原因示唆を行います。"
     )
 
     uploaded_files = st.file_uploader(
-        "📁 PDFまたはExcelファイルをアップロード",
+        "📁 ファイルをアップロード (PDF/XLS/XLSX)",
         type=["pdf", "xls", "xlsx"],
         accept_multiple_files=True
     )
@@ -103,8 +96,7 @@ def main():
     other_dfs = {}
 
     for uploaded_file in uploaded_files:
-        name = uploaded_file.name
-        ext = os.path.splitext(name)[1].lower()
+        name, ext = uploaded_file.name, os.path.splitext(uploaded_file.name)[1].lower()
         buf = uploaded_file.read()
 
         if ext == ".pdf":
