@@ -15,28 +15,21 @@ if not api_key:
     st.stop()
 genai.configure(api_key=api_key)
 
-# ─── ユーティリティ ─────────────────────────────────────
+# ─── PDFユーティリティ ─────────────────────────────────
 def extract_tables_from_pdf(buf: bytes) -> pd.DataFrame:
-    """
-    pdfplumberで抽出した複数テーブルを
-    列名をそろえてから結合。違う列はNaN埋め。
-    """
     with pdfplumber.open(io.BytesIO(buf)) as pdf:
         raw_tables = []
         for page in pdf.pages:
             for table in page.extract_tables() or []:
                 if len(table) > 1:
                     df = pd.DataFrame(table[1:], columns=table[0])
-                    # 列名を文字列化
                     df.columns = [str(c).strip() for c in df.columns]
                     raw_tables.append(df)
     if not raw_tables:
         return pd.DataFrame()
-    # 全テーブルの列をユニオンしてから再構成
+    # 列を統一して concat
     all_cols = sorted({c for df in raw_tables for c in df.columns})
-    aligned = []
-    for df in raw_tables:
-        aligned.append(df.reindex(columns=all_cols))
+    aligned = [df.reindex(columns=all_cols) for df in raw_tables]
     return pd.concat(aligned, ignore_index=True, sort=False)
 
 def fallback_ocr_pdf(buf: bytes) -> str:
@@ -45,7 +38,6 @@ def fallback_ocr_pdf(buf: bytes) -> str:
 
 def normalize_df(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
-    # 余計な空白・カンマ除去
     df.columns = [str(c).strip() for c in df.columns]
     for c in df.columns:
         try:
@@ -57,8 +49,7 @@ def normalize_df(df: pd.DataFrame) -> pd.DataFrame:
             )
             df[c] = pd.to_numeric(df[c], errors="ignore")
         except Exception:
-            st.warning(f"⚠️ 列 '{c}' の正規化に失敗、元のまま保持します。")
-    # 完全空行・空列は削除
+            st.warning(f"⚠️ 列 '{c}' の正規化に失敗。元のまま保持します。")
     df.dropna(axis=0, how="all", inplace=True)
     df.dropna(axis=1, how="all", inplace=True)
     return df
@@ -93,31 +84,40 @@ def generate_ai_suggestions(df_diff: pd.DataFrame) -> str:
 def main():
     st.title("FundFlow Advisor 🏦")
     st.markdown(
-        "- PDFだけをアップロードして処理します\n"
+        "- サイドバーでPDFファイルをアップロード\n"
         "- 上部タブで「プレビュー」「差異サマリー」「AI示唆」を切り替え"
     )
 
     uploaded = st.sidebar.file_uploader(
-        "📁 公金日計PDF と 他日報PDF をアップロード",
-        type=["pdf"],
+        "📁 PDFファイルをアップロード (複数可)",
+        type=None,  # ここをNoneにして拡張子チェックをバイパス
         accept_multiple_files=True
     )
     if not uploaded:
         st.sidebar.info("ここでPDFファイルをアップロードしてください。")
         return
 
+    allowed_exts = {".pdf"}
     pub_df = pd.DataFrame()
     others = {}
 
     for f in uploaded:
         name = f.name
+        ext = os.path.splitext(name)[1].lower()
         buf = f.read()
-        # テーブル抽出
+
+        # 手動で拡張子チェック
+        if ext not in allowed_exts:
+            st.sidebar.error(f"🚫 {name} はPDFではありません。")
+            continue
+
+        # PDFからテーブル抽出
         df = extract_tables_from_pdf(buf)
         if df.empty:
-            st.sidebar.warning(f"{name} からテーブルを抽出できません。OCR結果を表示します。")
+            st.sidebar.warning(f"{name} からテーブル抽出できません。OCRを表示します。")
             st.sidebar.text_area(f"OCR({name})", fallback_ocr_pdf(buf), height=150)
             continue
+
         df = normalize_df(df)
         if pub_df.empty:
             pub_df = df
@@ -125,7 +125,7 @@ def main():
             others[name] = df
 
     if pub_df.empty or not others:
-        st.warning("公金日計PDF と 他日報PDF の両方が必要です。")
+        st.warning("公金日計PDFと他日報PDFが揃っていません。")
         return
 
     df_diff = reconcile_reports(pub_df, others)
@@ -136,12 +136,12 @@ def main():
         st.subheader("■ 公金日計プレビュー")
         st.code(pub_df.to_string(index=False), language="")
         for name, df in others.items():
-            st.subheader(f"■ 他日報プレビュー：{name}")
+            st.subheader(f"■ 他日報プレビュー: {name}")
             st.code(df.to_string(index=False), language="")
 
     with tab2:
         if df_diff.empty:
-            st.success("差異は検出されませんでした。")
+            st.success("🎉 差異は検出されませんでした。")
         else:
             st.subheader("■ 差異サマリー")
             st.code(df_diff.to_string(index=False), language="")
