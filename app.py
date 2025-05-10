@@ -27,29 +27,32 @@ def fallback_ocr_pdf(file_bytes: bytes) -> str:
         text += pytesseract.image_to_string(img, lang="jpn")
     return text
 
-# ─── データ正規化関数（修正版） ─────────────────────────────
+# ─── データ正規化関数 ───────────────────────────────────
 def normalize_df(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    各列を以下の順でクリーン:
-      1) 余白・カンマ削除（object dtype のみ）
-      2) 数値変換（可能な場合）
-    Series 以外はスキップ。
-    """
     df = df.copy()
     df.columns = df.columns.str.strip()
     for col in df.columns:
         ser = df[col]
-        # Series 以外（たとえば MultiIndex 選択）はスキップ
-        if not isinstance(ser, pd.Series):
-            continue
-        # object dtype のみ文字列操作
         if ser.dtype == object:
             df[col] = ser.str.replace(",", "", regex=True).str.strip()
-        # 数値に変換可能なら変換
         try:
             df[col] = pd.to_numeric(df[col])
         except Exception:
             pass
+    return df
+
+# ─── 表示用サニタイズ関数 ─────────────────────────────────
+def sanitize_df_for_display(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    st.dataframe で pyarrow エラーが出ないよう、
+    object 列の非スカラー値を文字列化して返す。
+    """
+    df = df.copy()
+    for col in df.columns:
+        if df[col].dtype == object:
+            df[col] = df[col].apply(
+                lambda x: x if isinstance(x, (str, int, float, bool, type(None))) else str(x)
+            )
     return df
 
 # ─── 突合ロジック ───────────────────────────────────
@@ -94,7 +97,7 @@ def main():
     st.set_page_config(page_title="FundFlow Advisor", layout="wide")
     st.title("FundFlow Advisor")
     st.markdown(
-        "公金日計PDFと他部署日報PDFをアップロードし、"
+        "公金日計PDFと各部署日報PDFをアップロードし、"
         "差異突合結果と Gemini 2.5 による原因示唆を行います。"
     )
 
@@ -126,7 +129,7 @@ def main():
         st.text_area("OCR（公金日計）", fallback_ocr_pdf(buf), height=200)
     df_pub = normalize_df(df_pub)
     st.subheader("公金日計プレビュー")
-    st.dataframe(df_pub)
+    st.dataframe(sanitize_df_for_display(df_pub))
 
     # 他部署日報解析
     other_dfs = {}
@@ -139,7 +142,7 @@ def main():
         df = normalize_df(df)
         other_dfs[f.name] = df
         st.subheader(f"{f.name} プレビュー")
-        st.dataframe(df)
+        st.dataframe(sanitize_df_for_display(df))
 
     # 突合＆AI示唆
     diffs = reconcile_reports(df_pub, other_dfs)
