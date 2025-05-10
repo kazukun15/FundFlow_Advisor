@@ -1,5 +1,4 @@
-import io
-import os
+import io, os, re
 import streamlit as st
 import pdfplumber
 import pandas as pd
@@ -48,17 +47,16 @@ def fallback_ocr_pdf(buf: bytes) -> str:
 
 def normalize_df(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
-    df.columns = [str(c).strip() for c in df.columns]
+    # 列名：全角・半角スペース除去
+    df.columns = [re.sub(r"\s+", "", str(c)) for c in df.columns]
     for c in df.columns:
-        try:
-            s = (df[c]
-                 .astype(str)
-                 .str.replace(",", "", regex=False)
-                 .str.strip()
-                 .replace({"": pd.NA}))
-            df[c] = pd.to_numeric(s, errors="ignore")
-        except Exception:
-            st.warning(f"⚠️ 列 '{c}' の正規化に失敗しました。")
+        s = (
+            df[c]
+            .astype(str)
+            .map(lambda x: re.sub(r"[^\d\.\-]", "", x))
+            .replace({"": pd.NA})
+        )
+        df[c] = pd.to_numeric(s, errors="ignore")
     df.dropna(axis=0, how="all", inplace=True)
     df.dropna(axis=1, how="all", inplace=True)
     return df
@@ -68,33 +66,44 @@ def reconcile_reports(pub: pd.DataFrame, others: dict) -> pd.DataFrame:
     rows = []
     for name, df in others.items():
         total = df.select_dtypes(include="number").sum().sum()
-        if base != total:
-            rows.append({
-                "レポート": name,
-                "公金日計合計": base,
-                "他日報合計": total,
-                "差異": total - base
-            })
+        rows.append({
+            "レポート": name,
+            "公金日計合計": base,
+            "他日報合計": total,
+            "差異": total - base
+        })
     return pd.DataFrame(rows)
 
-def analyze_cash_flow(pub: pd.DataFrame) -> dict:
-    # 金額列を特定
-    if "金額" in pub.columns:
-        amt = pub["金額"].dropna()
+def analyze_cash_flow(pub: pd.DataFrame) -> tuple[dict, pd.DataFrame]:
+    # 「会計前日残高」があれば先頭行で開閉バランスとして抽出
+    ob = pub["会計前日残高"].dropna().iloc[0] if "会計前日残高" in pub.columns else None
+
+    num = pub.select_dtypes(include="number")
+    col_sums = num.sum().rename("合計").to_frame()
+
+    # 優先列選定
+    if "入金" in num.columns and "出金" in num.columns:
+        inflow = num["入金"].sum()
+        outflow = num["出金"].sum()
+    elif "収入" in num.columns and "支出" in num.columns:
+        inflow = num["収入"].sum()
+        outflow = num["支出"].sum()
+    elif "月計収支" in num.columns:
+        # 月計収支 = 収入-支出 と仮定
+        inflow = num["月計収支"][num["月計収支"] > 0].sum()
+        outflow = -num["月計収支"][num["月計収支"] < 0].sum()
     else:
-        nums = pub.select_dtypes(include="number")
-        if nums.empty:
-            return {}
-        amt = nums.iloc[:, 0]
-    inflow = amt[amt > 0].sum()
-    outflow = -amt[amt < 0].sum()
+        inflow = num[num>0].sum().sum()
+        outflow = -num[num<0].sum().sum()
+
     net = inflow - outflow
-    return {"総流入": inflow, "総流出": outflow, "純増減": net}
+    metrics = {"始値(前日残高)": ob, "総流入": inflow, "総流出": outflow, "純増減": net}
+    return metrics, col_sums
 
 def generate_ai_suggestions(df_diff: pd.DataFrame) -> str:
-    table = df_diff.to_string(index=False)
+    table = df_diff[df_diff["差異"] != 0].to_string(index=False) or "（全レポート差異なし）"
     prompt = (
-        "以下の日報突合結果について、差異の原因を箇条書きで示してください。\n\n"
+        "以下の差異について、原因を箇条書きで示してください。\n\n"
         + table
     )
     resp = genai.chat.completions.create(
@@ -108,47 +117,41 @@ def generate_ai_suggestions(df_diff: pd.DataFrame) -> str:
 def main():
     st.title("FundFlow Advisor 🏦")
     st.markdown(
-        "- サイドバーで **PDF** ファイルをアップロード\n"
-        "- 上部タブで「プレビュー」「差異サマリー」「分析」「AI示唆」を切り替え"
+        "- サイドバーでPDFをアップロード\n"
+        "- 上部タブで「プレビュー」「差異サマリー」「分析」「AI示唆」"
     )
 
     uploaded = st.sidebar.file_uploader(
-        "📁 公金日計PDF と 他日報PDF を選択",
-        type=None, accept_multiple_files=True
+        "📁 公金日計PDF と 他日報PDF", type=None, accept_multiple_files=True
     )
     if not uploaded:
         st.sidebar.info("ここでPDFをアップロードしてください。")
         return
 
-    pub_df = pd.DataFrame()
-    others = {}
+    pub_df, others = pd.DataFrame(), {}
     for f in uploaded:
-        name = f.name
-        ext = os.path.splitext(name)[1].lower()
-        buf = f.read()
-        if ext != ".pdf":
-            st.sidebar.error(f"{name} はPDFではありません。スキップ。")
+        if not f.name.lower().endswith(".pdf"):
+            st.sidebar.error(f"{f.name} はPDFではありません")
             continue
+        buf = f.read()
         df = extract_tables_from_pdf(buf)
         if df.empty:
-            st.sidebar.warning(f"{name} の抽出失敗。OCRを表示。")
-            st.sidebar.text_area(f"OCR({name})", fallback_ocr_pdf(buf), height=150)
+            st.sidebar.warning(f"{f.name} 抽出失敗。OCRを表示")
+            st.sidebar.text_area(f"OCR({f.name})", fallback_ocr_pdf(buf), height=150)
             continue
         df = normalize_df(df)
         if pub_df.empty:
-            pub_df = df
-            st.sidebar.success(f"{name} を基準データに設定")
+            pub_df = df; st.sidebar.success(f"{f.name} を基準に設定")
         else:
-            others[name] = df
-            st.sidebar.success(f"{name} を他日報に追加")
+            others[f.name] = df; st.sidebar.success(f"{f.name} を他日報に追加")
 
     if pub_df.empty or not others:
-        st.warning("公金日計PDFと他日報PDFを最低1件ずつアップロードしてください。")
+        st.warning("基準と他日報、両方のPDFが必要です。")
         return
 
     df_diff = reconcile_reports(pub_df, others)
-    cash_metrics = analyze_cash_flow(pub_df)
-    ai_text = generate_ai_suggestions(df_diff) if not df_diff.empty else ""
+    cash_metrics, col_sums = analyze_cash_flow(pub_df)
+    ai_text = generate_ai_suggestions(df_diff)
 
     tab1, tab2, tab3, tab4 = st.tabs(
         ["🔍 プレビュー", "📊 差異サマリー", "💡 分析", "🤖 AI示唆"]
@@ -156,41 +159,39 @@ def main():
 
     with tab1:
         st.subheader("■ 公金日計プレビュー")
+        st.write("**列名一覧(正規化後)**", list(pub_df.columns))
         st.dataframe(pub_df, use_container_width=True)
         for name, df in others.items():
             st.subheader(f"■ 他日報プレビュー：{name}")
             st.dataframe(df, use_container_width=True)
 
     with tab2:
-        if df_diff.empty:
-            st.success("差異は検出されませんでした。")
-        else:
-            st.subheader("■ 差異サマリー")
-            st.dataframe(df_diff, use_container_width=True)
+        st.subheader("■ 差異サマリー")
+        st.dataframe(df_diff, use_container_width=True)
 
     with tab3:
-        st.subheader("■ 多角的キャッシュフロー分析")
-        if cash_metrics:
-            col1, col2, col3 = st.columns(3)
-            col1.metric("総流入", f"{cash_metrics['総流入']:,}")
-            col2.metric("総流出", f"{cash_metrics['総流出']:,}")
-            col3.metric("純増減", f"{cash_metrics['純増減']:,}")
-            # リスク評価
-            if cash_metrics["純増減"] < 0:
-                st.error("⚠️ 資金ショートのリスクがあります。")
-            elif cash_metrics["純増減"] < cash_metrics["総流出"] * 0.1:
-                st.warning("⚠️ 増減が小さく、資金運用の余裕が乏しい可能性があります。")
-            else:
-                st.success("✅ キャッシュポジションは健全です。")
+        st.subheader("■ キャッシュフロー／列合計分析")
+        # 前日残高
+        if cash_metrics["始値(前日残高)"] is not None:
+            st.metric("前日残高", f"{int(cash_metrics['始値(前日残高)']):,}")
+        # 流入・流出・純増減
+        c1, c2, c3 = st.columns(3)
+        c1.metric("総流入", f"{int(cash_metrics['総流入']):,}")
+        c2.metric("総流出", f"{int(cash_metrics['総流出']):,}")
+        c3.metric("純増減", f"{int(cash_metrics['純増減']):,}")
+        st.subheader("◾ 列ごとの合計値")
+        st.dataframe(col_sums, use_container_width=True)
+        # リスク判定
+        if cash_metrics["純増減"] < 0:
+            st.error("⚠️ 資金ショートのリスクがあります。")
+        elif cash_metrics["純増減"] < cash_metrics["総流出"] * 0.1:
+            st.warning("⚠️ 資金余裕が乏しい可能性があります。")
         else:
-            st.info("数値データが見つからないためキャッシュ分析をスキップします。")
+            st.success("✅ キャッシュポジションは健全です。")
 
     with tab4:
-        if df_diff.empty:
-            st.info("差異のある列がないためAI示唆はありません。")
-        else:
-            st.subheader("■ 差異原因示唆 (Gemini 2.5)")
-            st.markdown(ai_text)
+        st.subheader("■ 差異原因示唆 (Gemini 2.5)")
+        st.markdown(ai_text)
 
 if __name__ == "__main__":
     main()
