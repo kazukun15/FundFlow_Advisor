@@ -44,8 +44,8 @@ def normalize_df(df: pd.DataFrame) -> pd.DataFrame:
 # ─── 表示用サニタイズ関数 ─────────────────────────────────
 def sanitize_df_for_display(df: pd.DataFrame) -> pd.DataFrame:
     """
-    st.dataframe で pyarrow エラーが出ないよう、
-    object 列の非スカラー値を文字列化して返す。
+    pyarrow が Arrow テーブル変換時に対応できない
+    非スカラー値をすべて文字列化して返す。
     """
     df = df.copy()
     for col in df.columns:
@@ -127,6 +127,7 @@ def main():
     if df_pub.empty:
         st.warning("公金日計のテーブル抽出に失敗しました。OCR結果をご確認ください。")
         st.text_area("OCR（公金日計）", fallback_ocr_pdf(buf), height=200)
+
     df_pub = normalize_df(df_pub)
     st.subheader("公金日計プレビュー")
     st.dataframe(sanitize_df_for_display(df_pub))
@@ -139,6 +140,7 @@ def main():
         if df.empty:
             st.warning(f"{f.name} の抽出に失敗しました。OCR結果を表示します。")
             st.text_area(f"OCR（{f.name}）", fallback_ocr_pdf(buf), height=200)
+
         df = normalize_df(df)
         other_dfs[f.name] = df
         st.subheader(f"{f.name} プレビュー")
@@ -148,7 +150,7 @@ def main():
     diffs = reconcile_reports(df_pub, other_dfs)
     if diffs:
         st.subheader("▶ 差異サマリ")
-        st.table(pd.DataFrame(diffs))
+        st.table(sanitize_df_for_display(pd.DataFrame(diffs)))
         st.subheader("▶ Gemini 2.5 による原因示唆")
         suggestion = generate_ai_suggestions(diffs)
         st.markdown(suggestion)
