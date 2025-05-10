@@ -7,12 +7,13 @@ import pytesseract
 from pdf2image import convert_from_bytes
 import google.generativeai as genai
 
-# ─── Streamlit Secrets からのみ取得 ─────────────────────────
-API_SECRET_KEY = "GOOGLE_API_KEY"
-if API_SECRET_KEY not in st.secrets:
-    st.error(f"❌ Streamlit Secrets に `{API_SECRET_KEY}` を設定してください。")
+# ─── Streamlit Secrets から google セクションの api_key を取得 ────────────────────
+if "google" not in st.secrets or "api_key" not in st.secrets["google"]:
+    st.error('❌ `.streamlit/secrets.toml` に以下のように登録してください:\n\n'
+             '[google]\n'
+             'api_key = "YOUR_GOOGLE_API_KEY"')
     st.stop()
-genai.configure(api_key=st.secrets[API_SECRET_KEY])
+genai.configure(api_key=st.secrets["google"]["api_key"])
 
 # ─── ユーティリティ関数 ─────────────────────────────────────
 def make_unique(cols):
@@ -91,17 +92,13 @@ def ai_suggest(df_diff: pd.DataFrame) -> str:
     diff = df_diff[df_diff["差異"] != 0]
     txt = diff.to_string(index=False) if not diff.empty else "（差異なし）"
     prompt = f"以下の差異について、原因を箇条書きで示してください。\n\n{txt}"
-
     try:
-        # 指定されたGeminiモデルを使用
         model = genai.GenerativeModel("gemini-2.5-flash-preview-04-17")
         response = model.generate_content(prompt)
-        # レスポンスからテキストを取り出し
         if hasattr(response, "text") and response.text:
             return response.text.strip()
         if hasattr(response, "parts") and response.parts:
             return "".join(p.text for p in response.parts).strip()
-        # フォールバック
         st.warning("AIの応答形式が予期せぬものでした。")
         return "AIから有効な提案を取得できませんでした。"
     except Exception as e:
