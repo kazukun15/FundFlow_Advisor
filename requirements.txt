@@ -6,3 +6,4 @@ pillow
 pandas
 google-generativeai
 xlrd
+openpyxl
