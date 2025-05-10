@@ -11,7 +11,7 @@ import google.generativeai as genai
 st.set_page_config(page_title="FundFlow Advisor", layout="wide")
 api_key = st.secrets.get("google", {}).get("api_key")
 if not api_key:
-    st.error("❌ `.streamlit/secrets.toml` に [google] api_key を設定してください。")
+    st.error("❌ Secrets に google.api_key を設定してください。")
     st.stop()
 genai.configure(api_key=api_key)
 
@@ -19,13 +19,11 @@ genai.configure(api_key=api_key)
 def make_unique(cols):
     seen = {}
     out = []
-    for col in cols:
-        base = col
-        cnt = seen.get(base, 0)
-        if cnt:
-            col = f"{base}.{cnt}"
-        seen[base] = cnt + 1
-        out.append(col)
+    for c in cols:
+        cnt = seen.get(c, 0)
+        name = f"{c}.{cnt}" if cnt else c
+        seen[c] = cnt + 1
+        out.append(name)
     return out
 
 def extract_tables_from_pdf(buf: bytes) -> pd.DataFrame:
@@ -35,13 +33,11 @@ def extract_tables_from_pdf(buf: bytes) -> pd.DataFrame:
             for tbl in page.extract_tables() or []:
                 if len(tbl) > 1:
                     df = pd.DataFrame(tbl[1:], columns=tbl[0])
-                    # 列名をトリムかつ一意化
                     cols = [str(c).strip() for c in df.columns]
                     df.columns = make_unique(cols)
                     tables.append(df)
     if not tables:
         return pd.DataFrame()
-    # 列揃えして concat
     all_cols = sorted({c for df in tables for c in df.columns})
     aligned = [df.reindex(columns=all_cols) for df in tables]
     return pd.concat(aligned, ignore_index=True, sort=False)
@@ -55,8 +51,11 @@ def normalize_df(df: pd.DataFrame) -> pd.DataFrame:
     df.columns = [str(c).strip() for c in df.columns]
     for c in df.columns:
         try:
-            s = df[c].astype(str).str.replace(",", "", regex=False).str.strip()
-            s.replace({"": pd.NA}, inplace=True)
+            s = (df[c]
+                 .astype(str)
+                 .str.replace(",", "", regex=False)
+                 .str.strip()
+                 .replace({"": pd.NA}))
             df[c] = pd.to_numeric(s, errors="ignore")
         except Exception:
             st.warning(f"⚠️ 列 '{c}' の正規化に失敗しました。")
@@ -78,6 +77,20 @@ def reconcile_reports(pub: pd.DataFrame, others: dict) -> pd.DataFrame:
             })
     return pd.DataFrame(rows)
 
+def analyze_cash_flow(pub: pd.DataFrame) -> dict:
+    # 金額列を特定
+    if "金額" in pub.columns:
+        amt = pub["金額"].dropna()
+    else:
+        nums = pub.select_dtypes(include="number")
+        if nums.empty:
+            return {}
+        amt = nums.iloc[:, 0]
+    inflow = amt[amt > 0].sum()
+    outflow = -amt[amt < 0].sum()
+    net = inflow - outflow
+    return {"総流入": inflow, "総流出": outflow, "純増減": net}
+
 def generate_ai_suggestions(df_diff: pd.DataFrame) -> str:
     table = df_diff.to_string(index=False)
     prompt = (
@@ -91,20 +104,20 @@ def generate_ai_suggestions(df_diff: pd.DataFrame) -> str:
     )
     return resp.candidates[0].message.content
 
-# ─── メイン ───────────────────────────────────────────
+# ─── UI ─────────────────────────────────────────────────
 def main():
     st.title("FundFlow Advisor 🏦")
     st.markdown(
-        "- サイドバーでPDFをアップロード\n"
-        "- 上部タブで「プレビュー」「差異サマリー」「AI示唆」を切り替え"
+        "- サイドバーで **PDF** ファイルをアップロード\n"
+        "- 上部タブで「プレビュー」「差異サマリー」「分析」「AI示唆」を切り替え"
     )
 
     uploaded = st.sidebar.file_uploader(
-        "📁 公金日計PDFと他日報PDFをアップロード",
+        "📁 公金日計PDF と 他日報PDF を選択",
         type=None, accept_multiple_files=True
     )
     if not uploaded:
-        st.sidebar.info("ここでPDFファイルをアップロードしてください。")
+        st.sidebar.info("ここでPDFをアップロードしてください。")
         return
 
     pub_df = pd.DataFrame()
@@ -114,34 +127,38 @@ def main():
         ext = os.path.splitext(name)[1].lower()
         buf = f.read()
         if ext != ".pdf":
-            st.sidebar.error(f"{name} はPDFではありません。")
+            st.sidebar.error(f"{name} はPDFではありません。スキップ。")
             continue
         df = extract_tables_from_pdf(buf)
         if df.empty:
-            st.sidebar.warning(f"{name} のテーブル抽出失敗。OCRを表示。")
+            st.sidebar.warning(f"{name} の抽出失敗。OCRを表示。")
             st.sidebar.text_area(f"OCR({name})", fallback_ocr_pdf(buf), height=150)
             continue
         df = normalize_df(df)
         if pub_df.empty:
             pub_df = df
-            st.sidebar.success(f"{name} を公金日計としてセット")
+            st.sidebar.success(f"{name} を基準データに設定")
         else:
             others[name] = df
-            st.sidebar.success(f"{name} を他日報としてセット")
+            st.sidebar.success(f"{name} を他日報に追加")
 
     if pub_df.empty or not others:
-        st.warning("公金日計PDFと他日報PDFをそれぞれ1件以上アップロードしてください。")
+        st.warning("公金日計PDFと他日報PDFを最低1件ずつアップロードしてください。")
         return
 
     df_diff = reconcile_reports(pub_df, others)
+    cash_metrics = analyze_cash_flow(pub_df)
     ai_text = generate_ai_suggestions(df_diff) if not df_diff.empty else ""
 
-    tab1, tab2, tab3 = st.tabs(["🔍 プレビュー", "📊 差異サマリー", "🤖 AI示唆"])
+    tab1, tab2, tab3, tab4 = st.tabs(
+        ["🔍 プレビュー", "📊 差異サマリー", "💡 分析", "🤖 AI示唆"]
+    )
+
     with tab1:
         st.subheader("■ 公金日計プレビュー")
         st.dataframe(pub_df, use_container_width=True)
         for name, df in others.items():
-            st.subheader(f"■ 他日報プレビュー: {name}")
+            st.subheader(f"■ 他日報プレビュー：{name}")
             st.dataframe(df, use_container_width=True)
 
     with tab2:
@@ -152,7 +169,24 @@ def main():
             st.dataframe(df_diff, use_container_width=True)
 
     with tab3:
-        if not ai_text:
+        st.subheader("■ 多角的キャッシュフロー分析")
+        if cash_metrics:
+            col1, col2, col3 = st.columns(3)
+            col1.metric("総流入", f"{cash_metrics['総流入']:,}")
+            col2.metric("総流出", f"{cash_metrics['総流出']:,}")
+            col3.metric("純増減", f"{cash_metrics['純増減']:,}")
+            # リスク評価
+            if cash_metrics["純増減"] < 0:
+                st.error("⚠️ 資金ショートのリスクがあります。")
+            elif cash_metrics["純増減"] < cash_metrics["総流出"] * 0.1:
+                st.warning("⚠️ 増減が小さく、資金運用の余裕が乏しい可能性があります。")
+            else:
+                st.success("✅ キャッシュポジションは健全です。")
+        else:
+            st.info("数値データが見つからないためキャッシュ分析をスキップします。")
+
+    with tab4:
+        if df_diff.empty:
             st.info("差異のある列がないためAI示唆はありません。")
         else:
             st.subheader("■ 差異原因示唆 (Gemini 2.5)")
